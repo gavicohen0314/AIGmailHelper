@@ -4,6 +4,7 @@ from google.auth.transport.requests import Request
 import pickle
 import os.path
 import redis
+from gpt4all import GPT4All
 
 # Define the SCOPES. If modifying it, delete the token.pickle file.
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
@@ -35,7 +36,7 @@ def getEmails():
     service = build('gmail', 'v1', credentials=creds)
 
     # request the last 100 emails
-    result = service.users().messages().list(maxResults=10, userId='me').execute()
+    result = service.users().messages().list(maxResults=100, userId='me').execute()
     messages = result.get('messages')  # dictionary of the last 100 emails ids
 
     for email in messages:
@@ -71,14 +72,38 @@ def main():
     try:
         redis_client.ping()
         print("Connected to Redis!")
-        redis_active = True
     except redis.ConnectionError as e:
         print(f"Failed to connect to Redis: {e}")
-        redis_active = False
+        return
 
     email_dict = getEmails()
-    print(redis_active)
-    print(email_dict)
+
+    # initialize model
+    model = GPT4All(model_name='Meta-Llama-3-8B-Instruct.Q4_0.gguf')
+
+    for email_id in email_dict:
+        if not redis_client.exists(email_id):
+            sender = email_dict[email_id]["sender"]
+            subject = email_dict[email_id]["subject"]
+            prompt = f'''Classify the following email as one of the following categories (Work, School, Shopping, Entertainment, Other). Return only a single word output, no explanations or notes. Here is the email:
+Subject: "{subject}"
+Sender: "{sender}"
+'''
+            with model.chat_session():
+                category = model.generate(prompt, max_tokens=8, temp=0.3)
+            prompt = f'''Classify the following email as one of the following priorities (Urgent, Important, Normal). Return only a single word output, no explanations or notes. Here is the email:
+Subject: "{subject}"
+Sender: "{sender}"
+'''
+            with model.chat_session():
+                priority = model.generate(prompt, max_tokens=8, temp=0.3)
+            prompt = f'''Decide if I need to respond to the following email (Yes/No). Return only a single word output, no explanations or notes. Here is the email:
+Subject: "{subject}"
+Sender: "{sender}"
+'''
+            with model.chat_session():
+                respond = model.generate(prompt, max_tokens=8, temp=0.3)
+            redis_client.setex(name=email_id, value=str({"sender": sender, "subject": subject, "category": category, "priority": priority, "respond": respond}), time=3600*4)
 
 
 if __name__ == "__main__":
